@@ -7,7 +7,8 @@ from functools import partial
 from datasets import load_dataset
 import os
 
-# os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# because we are performing tokenization inside each worker, we need to disable tokenizer parallelism
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def to_cuda(batch, gpuid):
@@ -169,7 +170,7 @@ def collate_finetune(batch, pad_token_id, is_test=False):
     return result
 
 
-def collate_mp_clm_finetune(batch, pad_token_id=-100, is_test=False):
+def collate_clm_finetune(batch, pad_token_id=-100, is_test=False):
     # This collate function is mainly used for padding
     def pad(X, max_len=-1):
         if max_len < 0:
@@ -192,9 +193,13 @@ def collate_mp_clm_finetune(batch, pad_token_id=-100, is_test=False):
     return result
 
 
-def _test_finetune_data():
+def _test_finetune_seq2seq_data():
     data_set = CNNDailySeq2SeqDataset(
-        "t5-large", is_test=True, max_len=512, total_len=1024, model_type="t5"
+        "t5-large",
+        is_test=True,
+        summary_max_len=512,
+        article_max_len=1024,
+        model_type="t5",
     )
 
     # for i in range(10):
@@ -220,7 +225,7 @@ def _test_finetune_data():
 
 def _test_finetune_clm_data():
     data_set = CNNDailyCausalLMDataset(
-        "gpt2", is_test=True, max_len=512, total_len=1024, model_type="gpt2"
+        "gpt2", is_test=True, summary_max_len=512, total_len=1024, model_type="gpt2"
     )
 
     for i in range(10):
@@ -229,7 +234,7 @@ def _test_finetune_clm_data():
     tok = AutoTokenizer.from_pretrained("gpt2")
 
     collate_fn = partial(
-        collate_mp_clm_finetune,
+        collate_clm_finetune,
         is_test=True,
     )
 
@@ -244,5 +249,4 @@ def _test_finetune_clm_data():
 
 if __name__ == "__main__":
     _test_finetune_clm_data()
-    # _test_finetune_data_old()
-#    _test_brio_data()
+    _test_finetune_seq2seq_data()

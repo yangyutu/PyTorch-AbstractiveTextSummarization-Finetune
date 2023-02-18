@@ -184,15 +184,6 @@ class FinetuneCausalLM(pl.LightningModule):
         loss = self.forward(batch)
 
         self.log(
-            "train_loss",
-            loss,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-        )
-
-        self.log(
             "val_loss",
             loss,
             on_step=True,
@@ -221,74 +212,14 @@ class FinetuneCausalLM(pl.LightningModule):
         }
 
 
-def _test_model_finetune():
-    from torch.utils.data import Dataset, DataLoader
-    import os
-    import json
-    import torch
+def _test_seq2seq_model_finetune():
+    from torch.utils.data import DataLoader
     from transformers import (
-        BartTokenizer,
-        PegasusTokenizer,
         T5ForConditionalGeneration,
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailyDataset, collate_mp_finetune
-
-    pretrained_model_name = "google/flan-t5-base"
-    data_set = CNNDailyDataset(
-        pretrained_model_name,
-        is_test=False,
-        summary_max_len=512,
-        article_max_len=1024,
-        model_type="t5",
-    )
-    print(data_set[0])
-
-    tok = AutoTokenizer.from_pretrained(pretrained_model_name)
-
-    collate_fn = partial(
-        collate_mp_finetune,
-        pad_token_id=tok.pad_token_id,
-        is_test=False,
-    )
-
-    dataloader = DataLoader(
-        data_set, batch_size=16, shuffle=False, num_workers=4, collate_fn=collate_fn
-    )
-
-    config = {}
-    config["lr"] = 2e-3
-    config["lr_warm_up_steps"] = 10000
-
-    pretrained_model = T5ForConditionalGeneration.from_pretrained(
-        pretrained_model_name, cache_dir="./local_cache"
-    )
-    model = FinetuneSeq2SeqModel(config, pretrained_model, tok.pad_token_id, 0.0)
-
-    count = 0
-    for batch in dataloader:
-        # print(batch)
-        loss = model.training_step(batch)
-        print(loss)
-        count += 1
-        if count > 10:
-            break
-
-
-def _test_model_finetune():
-    from torch.utils.data import Dataset, DataLoader
-    import os
-    import json
-    import torch
-    from transformers import (
-        BartTokenizer,
-        PegasusTokenizer,
-        T5ForConditionalGeneration,
-        AutoTokenizer,
-    )
-    from functools import partial
-    from data_utils import CNNDailySeq2SeqDataset, collate_mp_finetune
+    from data_utils import CNNDailySeq2SeqDataset, collate_finetune
 
     pretrained_model_name = "google/flan-t5-base"
     data_set = CNNDailySeq2SeqDataset(
@@ -303,7 +234,7 @@ def _test_model_finetune():
     tok = AutoTokenizer.from_pretrained(pretrained_model_name)
 
     collate_fn = partial(
-        collate_mp_finetune,
+        collate_finetune,
         pad_token_id=tok.pad_token_id,
         is_test=False,
     )
@@ -325,25 +256,17 @@ def _test_model_finetune():
     for batch in dataloader:
         # print(batch)
         loss = model.training_step(batch)
-        print(loss)
-        count += 1
-        if count > 10:
-            break
+        break
 
 
-def _test_model_finetune_clm():
+def _test_clm_model_finetune():
     from torch.utils.data import Dataset, DataLoader
-    import os
-    import json
-    import torch
     from transformers import (
-        BartTokenizer,
-        PegasusTokenizer,
         GPT2LMHeadModel,
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailyCausalLMDataset, collate_mp_clm_finetune
+    from data_utils import CNNDailyCausalLMDataset, collate_clm_finetune
 
     pretrained_model_name = "gpt2"
     data_set = CNNDailyCausalLMDataset(
@@ -357,7 +280,7 @@ def _test_model_finetune_clm():
     tok = AutoTokenizer.from_pretrained(pretrained_model_name)
 
     collate_fn = partial(
-        collate_mp_clm_finetune,
+        collate_clm_finetune,
         is_test=False,
         pad_token_id=tok.eos_token_id,
     )
@@ -381,13 +304,10 @@ def _test_model_finetune_clm():
     for batch in dataloader:
         # print(batch)
         loss = model.training_step(batch)
-        print(loss)
-        count += 1
-        if count > 10:
-            break
+        break
 
 
 if __name__ == "__main__":
     # _test_BART_finetune()
-    # _test_model_finetune()
-    _test_model_finetune_clm()
+    _test_seq2seq_model_finetune()
+    _test_clm_model_finetune()
