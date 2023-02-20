@@ -3,7 +3,7 @@ export CUDA_VISIBLE_DEVICES="0"
 pretrained_model_name="facebook/bart-large"
 pretrained_model_name="t5-base"
 pretrained_model_type="t5"
-python run_bart_finetune_infer.py \
+python run_seq2seq_finetune_infer.py \
 --pretrained_model_name ${pretrained_model_name} \
 --pretrained_model_type ${pretrained_model_type} \
 --model_ckpt /mnt/d/MLData/Repos/PyTorch-AbstractiveTextSummarization-FineTune/ckpt/model-2ee9vhnr-v1/model.ckpt \
