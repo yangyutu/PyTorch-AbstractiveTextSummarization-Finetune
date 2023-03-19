@@ -68,6 +68,7 @@ class CNNDailySeq2SeqDataset(Dataset):
             pad_to_max_length=False,
             truncation=True,
         )["input_ids"].squeeze(0)
+        # target_ids has the bos and eos tokens at the start and end
         result = {
             "src_input_ids": src_input_ids,
             "target_ids": abstract_input_ids,
