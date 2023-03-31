@@ -221,7 +221,7 @@ def collate_clm_finetune(batch, pad_token_id=-100, is_test=False):
 class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
     def __init__(
         self,
-        fdir,
+        data_dir,
         tokenizer_name,
         is_test=False,
         summary_max_len=-1,
@@ -232,15 +232,15 @@ class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
         num=-1,
     ):
         """data format: article, abstract, [(candidiate_i, score_i)]"""
-        self.isdir = os.path.isdir(fdir)
+        self.isdir = os.path.isdir(data_dir)
         if self.isdir:
-            self.fdir = fdir
+            self.data_dir = data_dir
             if num > 0:
-                self.num = min(len(os.listdir(fdir)), num)
+                self.num = min(len(os.listdir(data_dir)), num)
             else:
-                self.num = len(os.listdir(fdir))
+                self.num = len(os.listdir(data_dir))
         else:
-            with open(fdir) as f:
+            with open(data_dir) as f:
                 self.files = [x.strip() for x in f]
             if num > 0:
                 self.num = min(len(self.files), num)
@@ -261,7 +261,7 @@ class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.isdir:
-            with open(os.path.join(self.fdir, "%d.json" % idx), "r") as f:
+            with open(os.path.join(self.data_dir, "%d.json" % idx), "r") as f:
                 data = json.load(f)
         else:
             with open(self.files[idx]) as f:
@@ -345,9 +345,9 @@ def _test_finetune_seq2seq_data():
 
 def _test_finetune_seq2seq_with_candidates_data():
     model_name = "facebook/bart-large-cnn"
-    fdir = "/mnt/d/MLData/data/summarization/cnndm_bart/cnndm/diverse/test/"
+    data_dir = "/mnt/d/MLData/data/summarization/cnndm_bart/cnndm/diverse/test/"
     data_set = CNNDailyWithCandidatesSeq2SeqDataset(
-        fdir=fdir,
+        data_dir=data_dir,
         tokenizer_name=model_name,
         is_test=True,
         summary_max_len=128,
