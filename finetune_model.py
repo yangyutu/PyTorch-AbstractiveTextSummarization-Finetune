@@ -3,30 +3,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from transformers import BartForConditionalGeneration, BartTokenizer
+from transformers import AutoModelForSeq2SeqLM
 from label_smoothing_loss import label_smoothing_loss
 from typing import Dict
 import pytorch_lightning as pl
 from losses import RankingLoss
 from modeling_bart import BartScorer
 
+
 class FinetuneSeq2SeqModel(pl.LightningModule):
-    def __init__(self, config: Dict, pretrained_model, pad_token_id, label_smooth=0.0):
+    def __init__(self, config: Dict, pretrained_model_name, pad_token_id):
         super().__init__()
         self.save_hyperparameters()
-        self.model = pretrained_model
+        self.model = AutoModelForSeq2SeqLM.from_pretrained(pretrained_model_name)
         self.pad_token_id = pad_token_id
         self.config = config
 
-        if label_smooth > 0:
-            self.mle_fn = label_smoothing_loss(
-                ignore_index=pad_token_id, epsilon=label_smooth
-            )
-        else:
-            self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+        self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     def forward(self, text_id, target_id):
-
         batch_size = text_id.size(0)
 
         input_mask = text_id != self.pad_token_id
@@ -45,7 +40,6 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
         return logits
 
     def training_step(self, batch, batch_idx=0):
-
         logits_raw = self.forward(batch["src_input_ids"], batch["target_ids"])
         logits = logits_raw[:, :-1].reshape(
             -1, logits_raw.size(-1)
@@ -64,7 +58,6 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx=0):
-
         logits_raw = self.forward(
             batch["src_input_ids"],
             batch["target_ids"],
@@ -92,7 +85,6 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
         do_sample=False,
         **kwargs,
     ):
-
         input_mask = src_input_ids != self.pad_token_id
 
         with torch.no_grad():
@@ -125,6 +117,7 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
             },
         }
 
+
 class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
     def __init__(self, config: Dict, pretrained_model, pad_token_id, label_smooth=0.0):
         super().__init__()
@@ -132,8 +125,8 @@ class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
         self.model = pretrained_model
         self.pad_token_id = pad_token_id
         self.config = config
-        self.adding = self.config.get('adding',0.0)
-        self.length_penalty = self.config.get('length_penalty',2.0)
+        self.adding = self.config.get("adding", 0.0)
+        self.length_penalty = self.config.get("length_penalty", 2.0)
         self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
         self.ranking_loss = RankingLoss
 
@@ -141,13 +134,12 @@ class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
         self.ctr_loss_weight, self.mle_weight = 1.0, 1.0
 
     def forward(self, text_id, target_id):
-
         batch_size = text_id.size(0)
-        
+
         new_text_id = []
         for _ in range(target_id.size(0)):
             new_text_id.append(text_id.expand(target_id.size(1), -1))
-        
+
         text_id = torch.concat(new_text_id)
         target_id = target_id.reshape(-1, target_id.size(-1))
 
@@ -167,21 +159,28 @@ class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
         return logits
 
     def _compute_loss(self, batch):
-        
         logits_raw = self.forward(batch["src_input_ids"], batch["candidate_ids"])
         batch_size = batch["src_input_ids"].size(0)
         logits_raw = logits_raw.view(
             batch_size, -1, logits_raw.size(1), logits_raw.size(2)
         )  # [bz, cand_num, seq_len, word_dim] # 17 cand, 1 is gold, other are the generated candidates
-        
-        logits_raw = logits_raw[:, :, :-1]  # truncate last token # 1 x cand x (seq_len - 1) x word_dim
-        gold_logits = logits_raw[:, 0] # logits_raw for the gold # 1 x seq_len x word_dim
+
+        logits_raw = logits_raw[
+            :, :, :-1
+        ]  # truncate last token # 1 x cand x (seq_len - 1) x word_dim
+        gold_logits = logits_raw[
+            :, 0
+        ]  # logits_raw for the gold # 1 x seq_len x word_dim
         candidate_id = batch["candidate_ids"][:, :, 1:]  # shift right
         cand_mask = candidate_id != self.pad_token_id
         candidate_id = candidate_id.unsqueeze(-1)
 
         logits_raw_normalized = F.log_softmax(logits_raw, dim=3)
-        logits_at_candidate_tokens = torch.gather(logits_raw_normalized, 3, candidate_id).squeeze(-1)  # [bz, cand_num, seq_len]
+        logits_at_candidate_tokens = torch.gather(
+            logits_raw_normalized, 3, candidate_id
+        ).squeeze(
+            -1
+        )  # [bz, cand_num, seq_len]
 
         cand_mask = cand_mask.float()
         scores = torch.mul(logits_at_candidate_tokens, cand_mask).sum(-1) / (
@@ -191,25 +190,26 @@ class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
         candiate_score = scores[:, 1:]
         gold_score = scores[:, 0]
 
-        gold_ids = batch["candidate_ids"][:, 0, 1:]  # shift right # the first one is the gold reference
-            
-        mle_loss = self.mle_fn(gold_logits.view(-1, gold_logits.size(-1)), gold_ids.view(-1)) # self.mle_fn(gold_logits, gold_ids)
-            
-        ctr_loss = self.ranking_loss(candiate_score, gold_score, self.margin, self.gold_margin, self.gold_weight)
-            
-        loss = self.ctr_loss_weight * ctr_loss + self.mle_weight * mle_loss
+        gold_ids = batch["candidate_ids"][
+            :, 0, 1:
+        ]  # shift right # the first one is the gold reference
 
+        mle_loss = self.mle_fn(
+            gold_logits.view(-1, gold_logits.size(-1)), gold_ids.view(-1)
+        )  # self.mle_fn(gold_logits, gold_ids)
+
+        ctr_loss = self.ranking_loss(
+            candiate_score, gold_score, self.margin, self.gold_margin, self.gold_weight
+        )
+
+        loss = self.ctr_loss_weight * ctr_loss + self.mle_weight * mle_loss
 
         return loss, mle_loss, ctr_loss, batch_size
 
     def training_step(self, batch, batch_idx=0):
-
         loss, mle_loss, ctr_loss, batch_size = self._compute_loss(batch)
         self.log_dict(
-            {'ctr_loss': ctr_loss,
-             'mle_loss': mle_loss,
-              'loss':loss  
-            },
+            {"ctr_loss": ctr_loss, "mle_loss": mle_loss, "loss": loss},
             batch_size=batch_size,
             on_step=True,
             on_epoch=True,
@@ -219,13 +219,9 @@ class FinetuneWithContrastSeq2SeqModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx=0):
-
         loss, mle_loss, ctr_loss, batch_size = self._compute_loss(batch)
         self.log_dict(
-            {'ctr_loss': ctr_loss,
-             'mle_loss': mle_loss,
-              'val_loss':loss  
-            },
+            {"ctr_loss": ctr_loss, "mle_loss": mle_loss, "val_loss": loss},
             batch_size=batch_size,
             on_step=True,
             on_epoch=True,
@@ -260,8 +256,8 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
         self.model = pretrained_model
         self.pad_token_id = pad_token_id
         self.config = config
-        self.adding = self.config.get('adding',0.0)
-        self.length_penalty = self.config.get('length_penalty',2.0)
+        self.adding = self.config.get("adding", 0.0)
+        self.length_penalty = self.config.get("length_penalty", 2.0)
         self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
         self.ranking_loss = RankingLoss
 
@@ -269,9 +265,8 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
         self.ctr_loss_weight, self.mle_weight = 1.0, 1.0
 
     def forward(self, text_id, target_id):
-
         batch_size = text_id.size(0)
-        
+
         input_mask = text_id != self.pad_token_id
         target_mask = target_id != self.pad_token_id
         # cand_mask[:, :, 0] = 1
@@ -288,21 +283,28 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
         return logits
 
     def _compute_loss(self, batch):
-        
         logits_raw = self.forward(batch["src_input_ids"], batch["candidate_ids"])
         batch_size = batch["src_input_ids"].size(0)
         logits_raw = logits_raw.view(
             batch_size, -1, logits_raw.size(1), logits_raw.size(2)
         )  # [bz, cand_num, seq_len, word_dim] # 17 cand, 1 is gold, other are the generated candidates
-        
-        logits_raw = logits_raw[:, :, :-1]  # truncate last token # 1 x cand x (seq_len - 1) x word_dim
-        gold_logits = logits_raw[:, 0] # logits_raw for the gold # 1 x seq_len x word_dim
+
+        logits_raw = logits_raw[
+            :, :, :-1
+        ]  # truncate last token # 1 x cand x (seq_len - 1) x word_dim
+        gold_logits = logits_raw[
+            :, 0
+        ]  # logits_raw for the gold # 1 x seq_len x word_dim
         candidate_id = batch["candidate_ids"][:, :, 1:]  # shift right
         cand_mask = candidate_id != self.pad_token_id
         candidate_id = candidate_id.unsqueeze(-1)
 
         logits_raw_normalized = F.log_softmax(logits_raw, dim=3)
-        logits_at_candidate_tokens = torch.gather(logits_raw_normalized, 3, candidate_id).squeeze(-1)  # [bz, cand_num, seq_len]
+        logits_at_candidate_tokens = torch.gather(
+            logits_raw_normalized, 3, candidate_id
+        ).squeeze(
+            -1
+        )  # [bz, cand_num, seq_len]
 
         cand_mask = cand_mask.float()
         scores = torch.mul(logits_at_candidate_tokens, cand_mask).sum(-1) / (
@@ -312,25 +314,27 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
         candiate_score = scores[:, 1:]
         gold_score = scores[:, 0]
 
-        gold_ids = batch["candidate_ids"][:, 0, 1:]  # shift right # the first one is the gold reference
-            
-        mle_loss = self.mle_fn(gold_logits.view(-1, gold_logits.size(-1)), gold_ids.view(-1)) # self.mle_fn(gold_logits, gold_ids)
-            
-        ctr_loss = self.ranking_loss(candiate_score, gold_score, self.margin, self.gold_margin, self.gold_weight)
-            
-        loss = self.ctr_loss_weight * ctr_loss + self.mle_weight * mle_loss
+        gold_ids = batch["candidate_ids"][
+            :, 0, 1:
+        ]  # shift right # the first one is the gold reference
 
+        mle_loss = self.mle_fn(
+            gold_logits.view(-1, gold_logits.size(-1)), gold_ids.view(-1)
+        )  # self.mle_fn(gold_logits, gold_ids)
+
+        ctr_loss = self.ranking_loss(
+            candiate_score, gold_score, self.margin, self.gold_margin, self.gold_weight
+        )
+
+        loss = self.ctr_loss_weight * ctr_loss + self.mle_weight * mle_loss
 
         return loss, mle_loss, ctr_loss, batch_size
 
     def training_step(self, batch, batch_idx=0):
-        #self.model.scoring_mode()
+        # self.model.scoring_mode()
         loss, mle_loss, ctr_loss, batch_size = self._compute_loss(batch)
         self.log_dict(
-            {'ctr_loss': ctr_loss,
-             'mle_loss': mle_loss,
-              'loss':loss  
-            },
+            {"ctr_loss": ctr_loss, "mle_loss": mle_loss, "loss": loss},
             batch_size=batch_size,
             on_step=True,
             on_epoch=True,
@@ -340,13 +344,10 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx=0):
-        #self.model.scoring_mode()
+        # self.model.scoring_mode()
         loss, mle_loss, ctr_loss, batch_size = self._compute_loss(batch)
         self.log_dict(
-            {'ctr_loss': ctr_loss,
-             'mle_loss': mle_loss,
-              'val_loss':loss  
-            },
+            {"ctr_loss": ctr_loss, "mle_loss": mle_loss, "val_loss": loss},
             batch_size=batch_size,
             on_step=True,
             on_epoch=True,
@@ -414,7 +415,6 @@ class FinetuneCausalLM(pl.LightningModule):
         return loss
 
     def training_step(self, batch, batch_idx=0):
-
         loss = self.forward(batch)
 
         self.log(
@@ -429,7 +429,6 @@ class FinetuneCausalLM(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx=0):
-
         loss = self.forward(batch)
 
         self.log(
@@ -507,6 +506,7 @@ def _test_seq2seq_model_finetune():
         loss = model.training_step(batch)
         break
 
+
 def _test_seq2seq_with_candidates_model_finetune():
     from torch.utils.data import DataLoader
     from transformers import (
@@ -514,7 +514,10 @@ def _test_seq2seq_with_candidates_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailyWithCandidatesSeq2SeqDataset, collate_finetune_with_candidates
+    from data_utils import (
+        CNNDailyWithCandidatesSeq2SeqDataset,
+        collate_finetune_with_candidates,
+    )
 
     model_name = "facebook/bart-large-cnn"
     fdir = "/mnt/d/MLData/data/summarization/cnndm_bart/cnndm/diverse/test/"
@@ -524,7 +527,7 @@ def _test_seq2seq_with_candidates_model_finetune():
         is_test=True,
         summary_max_len=128,
         article_max_len=512,
-        max_cand_num=16
+        max_cand_num=16,
     )
 
     tok = AutoTokenizer.from_pretrained(model_name)
@@ -547,13 +550,16 @@ def _test_seq2seq_with_candidates_model_finetune():
     pretrained_model = BartForConditionalGeneration.from_pretrained(
         model_name, cache_dir="./local_cache"
     )
-    model = FinetuneWithContrastSeq2SeqModel(config, pretrained_model, tok.pad_token_id, 0.0)
+    model = FinetuneWithContrastSeq2SeqModel(
+        config, pretrained_model, tok.pad_token_id, 0.0
+    )
 
     count = 0
     for batch in dataloader:
         # print(batch)
         loss = model.training_step(batch)
         break
+
 
 def _test_seq2seq_with_candidates_efficient_model_finetune():
     from torch.utils.data import DataLoader
@@ -562,7 +568,10 @@ def _test_seq2seq_with_candidates_efficient_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailyWithCandidatesSeq2SeqDataset, collate_finetune_with_candidates
+    from data_utils import (
+        CNNDailyWithCandidatesSeq2SeqDataset,
+        collate_finetune_with_candidates,
+    )
 
     model_name = "facebook/bart-large-cnn"
     fdir = "/mnt/d/MLData/data/summarization/cnndm_bart/cnndm/diverse/test/"
@@ -572,7 +581,7 @@ def _test_seq2seq_with_candidates_efficient_model_finetune():
         is_test=True,
         summary_max_len=128,
         article_max_len=512,
-        max_cand_num=16
+        max_cand_num=16,
     )
 
     tok = AutoTokenizer.from_pretrained(model_name)
@@ -592,10 +601,10 @@ def _test_seq2seq_with_candidates_efficient_model_finetune():
     config["lr"] = 2e-3
     config["lr_warm_up_steps"] = 10000
 
-    pretrained_model = BartScorer.from_pretrained(
-        model_name, cache_dir="./local_cache"
+    pretrained_model = BartScorer.from_pretrained(model_name, cache_dir="./local_cache")
+    model = FinetuneWithContrastEfficientSeq2SeqModel(
+        config, pretrained_model, tok.pad_token_id, 0.0
     )
-    model = FinetuneWithContrastEfficientSeq2SeqModel(config, pretrained_model, tok.pad_token_id, 0.0)
 
     count = 0
     for batch in dataloader:
@@ -603,7 +612,7 @@ def _test_seq2seq_with_candidates_efficient_model_finetune():
         loss = model.training_step(batch)
         break
 
-    
+
 def _test_clm_model_finetune():
     from torch.utils.data import Dataset, DataLoader
     from transformers import (

@@ -18,7 +18,8 @@ python run_seq2seq_finetune_train.py \
 --batch_size 16 \
 --grad_accum 2 \
 --num_workers 16 \
---truncate 128 \
+--article_truncate 512 \
+--summary_truncate 128 \
 --project_name abstract_text_summarization_finetune \
 --default_root_dir ./experiments/logs
 

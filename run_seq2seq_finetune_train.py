@@ -37,16 +37,16 @@ def _load_data(args):
     train_set = CNNDailySeq2SeqDataset(
         args.pretrained_model_name,
         split="train",
-        summary_max_len=args.truncate,
-        article_max_len=512,
+        summary_max_len=args.summary_truncate,
+        article_max_len=args.article_truncate,
         model_type=args.pretrained_model_type,
     )
     val_set = CNNDailySeq2SeqDataset(
         args.pretrained_model_name,
         split="validation",
         is_test=True,
-        summary_max_len=512,
-        article_max_len=512,
+        summary_max_len=args.summary_truncate,
+        article_max_len=args.article_truncate,
         model_type=args.pretrained_model_type,
     )
 
@@ -78,27 +78,16 @@ def main(args):
     config["lr"] = args.lr
     config["lr_warm_up_steps"] = args.lr_warm_up_steps
 
-    if args.pretrained_model_type.lower() == "bart":
-        pretrained_model = BartForConditionalGeneration.from_pretrained(
-            args.pretrained_model_name, cache_dir="./local_cache"
-        )
-    elif args.pretrained_model_type.lower() == "t5":
-        pretrained_model = T5ForConditionalGeneration.from_pretrained(
-            args.pretrained_model_name, cache_dir="./local_cache"
-        )
-    else:
-        raise ValueError(f"{args.pretrained_model_type} is not supported")
-
     model = FinetuneSeq2SeqModel(
         config=config,
-        pretrained_model=pretrained_model,
-        pad_token_id=tokenizer.pad_token_id,
-        label_smooth=0,
+        pretrained_model_name=args.pretrained_model_name,
+        pad_token_id=tokenizer.pad_token_id
     )
 
     tags = [args.pretrained_model_name]
     if args.exp_tag:
         tags.append(args.exp_tag)
+        
     wandb_logger = WandbLogger(
         project=args.project_name,  #
         log_model="all",
@@ -128,8 +117,6 @@ def main(args):
         deterministic=True,  # RuntimeError: scatter_add_cuda_kernel does not have a deterministic implementation, but you set 'torch.use_deterministic_algorithms(True)'.
     )
 
-    # trainer.validate(model, dataloaders=val_dataloader)
-    # 4. Train!
     trainer.fit(model, train_dataloader, val_dataloader)
 
 
@@ -153,9 +140,9 @@ def parse_arguments():
     # # model specific arguments
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_warm_up_steps", type=int, default=10000)
-    parser.add_argument("--truncate", type=int, default=512)
+    parser.add_argument("--article_truncate", type=int, default=512)
+    parser.add_argument("--summary_truncate", type=int, default=512)
     parser.add_argument("--pretrained_model_type", type=str, default="roberta-base")
-
     parser.add_argument("--pretrained_model_name", type=str, default="roberta-base")
 
     parser.add_argument("--batch_size", type=int, default=32)
