@@ -45,8 +45,8 @@ def main(args):
     test_set = CNNDailySeq2SeqDataset(
         args.pretrained_model_name,
         split="test",
-        summary_max_len=args.truncate,
-        article_max_len=512,
+        summary_max_len=args.summary_truncate,
+        article_max_len=args.article_truncate,
         is_test=True,
         model_type=args.pretrained_model_type,
     )
@@ -107,7 +107,9 @@ def parse_arguments():
     # # model specific arguments
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_warm_up_steps", type=int, default=10000)
-    parser.add_argument("--truncate", type=int, default=512)
+    parser.add_argument("--summary_truncate", type=int, default=128)
+    parser.add_argument("--article_truncate", type=int, default=512)
+    
     parser.add_argument("--num_beams", type=int, default=4)
     parser.add_argument(
         "--pretrained_model_name", type=str, default="facebook/bart-large-cnn"

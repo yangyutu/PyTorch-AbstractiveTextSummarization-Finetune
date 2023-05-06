@@ -3,6 +3,7 @@ import os
 import json
 import torch
 from transformers import BartTokenizer, PegasusTokenizer, AutoTokenizer
+import pytorch_lightning as pl
 from functools import partial
 from datasets import load_dataset
 import os
@@ -17,68 +18,154 @@ def to_cuda(batch, gpuid):
             batch[n] = batch[n].to(gpuid)
 
 
-class CNNDailySeq2SeqDataset(Dataset):
+def collate_finetune(tokenizer, batch, pad_token_id, is_test=False):
+    # This collate function is mainly used for padding
+    def pad(X, max_len=-1):
+        if max_len < 0:
+            max_len = max(x.size(0) for x in X)
+        result = torch.ones(len(X), max_len, dtype=X[0].dtype) * pad_token_id
+        for i, x in enumerate(X):
+            result[i, : x.size(0)] = x
+        return result
+
+    src_input_ids = pad([x["src_input_ids"] for x in batch])
+    target_ids = [x["target_ids"] for x in batch]
+    max_len = max([len(x) for x in target_ids])
+    target_ids = pad(target_ids, max_len)
+    if is_test:
+        data = [x["data"] for x in batch]
+    result = {
+        "src_input_ids": src_input_ids,
+        "target_ids": target_ids,
+    }
+    if is_test:
+        result["data"] = data
+    return result
+
+
+def pair_text_collate_with_tokenization(
+    data, tokenizer, encoder_truncate, decoder_truncate, is_test=False
+):
+    input_texts, target_texts = zip(*data)
+    encoded_input = tokenizer(
+        list(input_texts),
+        return_tensors="pt",
+        max_length=encoder_truncate,
+        truncation=True,
+        padding=True,
+    )
+    encoded_target = tokenizer(
+        list(target_texts),
+        return_tensors="pt",
+        max_length=decoder_truncate,
+        truncation=True,
+        padding=True,
+    )
+
+    if not is_test:
+        return {"input_text": encoded_input, "target_text": encoded_target}
+    else:
+        return {
+            "input_text": encoded_input,
+            "target_text": encoded_target,
+            "raw_target_text": target_texts,
+        }
+
+
+class CNNDailyPairTextDataset(Dataset):
+    def __init__(self, split="train", add_prefix="", add_suffix=""):
+        self.dataset = load_dataset("cnn_dailymail", version="3.0.0")[split]
+        self.add_prefix = add_prefix
+        self.add_suffix = add_suffix
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        input_text = self.dataset[idx]["article"]
+        target_text = self.dataset[idx]["highlights"].replace("\n", " ")
+        if self.add_prefix:
+            input_text = self.add_prefix + " " + input_text
+        if self.add_suffix:
+            target_text = input_text + " " + self.add_suffix
+        return input_text, target_text
+
+
+class CNNDailySeq2SeqDataModule(pl.LightningDataModule):
     def __init__(
         self,
         tokenizer_name,
-        split="train",
-        summary_max_len=-1,
-        is_test=False,
         article_max_len=512,
-        model_type="",
+        summary_max_len=128,
+        add_prefix="",
+        add_suffix="",
+        batch_size=128,
+        num_workers=16,
     ):
-        """data format: article, abstract, [(candidiate_i, score_i)]"""
-        self.dataset_raw = load_dataset("cnn_dailymail", version="3.0.0")[split]
-        self.tok = AutoTokenizer.from_pretrained(
-            tokenizer_name, verbose=False, model_max_length=512
-        )
-        self.summary_max_len = summary_max_len
-        self.is_test = is_test
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         self.article_max_len = article_max_len
-        self.model_type = model_type
+        self.summary_max_len = summary_max_len
+        self.add_prefix = add_prefix
+        self.add_suffix = add_suffix
+        self.batch_size = batch_size
+        self.num_workers = num_workers
 
-        # pre-load the whole dataset to memory will significantly speed up
-        self.dataset = {
-            "article": list(self.dataset_raw["article"]),
-            "highlights": list(self.dataset_raw["highlights"]),
-        }
+    def train_dataloader(self):
+        dataset = CNNDailyPairTextDataset(
+            split="train", add_prefix=self.add_prefix, add_suffix=self.add_suffix
+        )
+        collate_fn = partial(
+            pair_text_collate_with_tokenization,
+            tokenizer=self.tokenizer,
+            encoder_truncate=self.article_max_len,
+            decoder_truncate=self.summary_max_len,
+            is_test=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
 
-    def __len__(self):
-        return len(self.dataset["article"])
+    def val_dataloader(self):
+        dataset = CNNDailyPairTextDataset(
+            split="validation", add_prefix=self.add_prefix, add_suffix=self.add_suffix
+        )
+        collate_fn = partial(
+            pair_text_collate_with_tokenization,
+            tokenizer=self.tokenizer,
+            encoder_truncate=self.article_max_len,
+            decoder_truncate=self.summary_max_len,
+            is_test=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
 
-    def __getitem__(self, idx):
-
-        src_txt = self.dataset["article"][idx]
-        if self.model_type.lower() == "t5":
-            # Prefix the input with a prompt so T5 knows this is a summarization task.
-            src_txt = "summarize: " + src_txt
-        src_input_ids = self.tok(
-            [src_txt],
-            max_length=self.article_max_len,
-            return_tensors="pt",
-            pad_to_max_length=False,
-            truncation=True,
-        )["input_ids"].squeeze(0)
-
-        abstract_txt = self.dataset["highlights"][idx].replace("\n", " ")
-        abstract_input_ids = self.tok(
-            [abstract_txt],
-            max_length=self.summary_max_len,
-            return_tensors="pt",
-            pad_to_max_length=False,
-            truncation=True,
-        )["input_ids"].squeeze(0)
-        # target_ids has the bos and eos tokens at the start and end
-        result = {
-            "src_input_ids": src_input_ids,
-            "target_ids": abstract_input_ids,
-        }
-        if self.is_test:
-            result["data"] = {
-                "article": src_txt,
-                "highlights": abstract_txt,
-            }
-        return result
+    def test_dataloader(self):
+        dataset = CNNDailyPairTextDataset(
+            split="test", add_prefix=self.add_prefix, add_suffix=self.add_suffix
+        )
+        collate_fn = partial(
+            pair_text_collate_with_tokenization,
+            tokenizer=self.tokenizer,
+            encoder_truncate=self.article_max_len,
+            decoder_truncate=self.summary_max_len,
+            is_test=True,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
 
 
 class CNNDailyCausalLMDataset(Dataset):
@@ -108,7 +195,6 @@ class CNNDailyCausalLMDataset(Dataset):
         return len(self.dataset["article"])
 
     def __getitem__(self, idx):
-
         src_txt = self.dataset["article"][idx]
 
         prompt = "\nTL;DR:\n"
@@ -146,36 +232,12 @@ class CNNDailyCausalLMDataset(Dataset):
         return result
 
 
-def collate_finetune(batch, pad_token_id, is_test=False):
-    # This collate function is mainly used for padding
-    def pad(X, max_len=-1):
-        if max_len < 0:
-            max_len = max(x.size(0) for x in X)
-        result = torch.ones(len(X), max_len, dtype=X[0].dtype) * pad_token_id
-        for (i, x) in enumerate(X):
-            result[i, : x.size(0)] = x
-        return result
-
-    src_input_ids = pad([x["src_input_ids"] for x in batch])
-    target_ids = [x["target_ids"] for x in batch]
-    max_len = max([len(x) for x in target_ids])
-    target_ids = pad(target_ids, max_len)
-    if is_test:
-        data = [x["data"] for x in batch]
-    result = {
-        "src_input_ids": src_input_ids,
-        "target_ids": target_ids,
-    }
-    if is_test:
-        result["data"] = data
-    return result
-
 def collate_finetune_with_candidates(batch, pad_token_id, is_test=False):
     def pad(X, max_len=-1):
         if max_len < 0:
             max_len = max(x.size(0) for x in X)
         result = torch.ones(len(X), max_len, dtype=X[0].dtype) * pad_token_id
-        for (i, x) in enumerate(X):
+        for i, x in enumerate(X):
             result[i, : x.size(0)] = x
         return result
 
@@ -201,7 +263,7 @@ def collate_clm_finetune(batch, pad_token_id=-100, is_test=False):
         if max_len < 0:
             max_len = max(x.size(0) for x in X)
         result = torch.ones(len(X), max_len, dtype=X[0].dtype) * pad_token_id
-        for (i, x) in enumerate(X):
+        for i, x in enumerate(X):
             result[i, : x.size(0)] = x
         return result
 
@@ -294,7 +356,7 @@ class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
             data["candidates"] = _candidates
         if not self.is_untok:
             candidates = _candidates
-        
+
         # cand_txt consists of the gold reference plus other candidates
         cand_txt = [" ".join(abstract)] + [" ".join(x[0]) for x in candidates]
         cand = self.tok.batch_encode_plus(
@@ -317,26 +379,9 @@ class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
 
 
 def _test_finetune_seq2seq_data():
-    data_set = CNNDailySeq2SeqDataset(
-        "t5-large",
-        is_test=True,
-        summary_max_len=512,
-        article_max_len=1024,
-        model_type="t5",
-    )
-
-    tok = AutoTokenizer.from_pretrained("facebook/bart-large-cnn")
-    tok = AutoTokenizer.from_pretrained("t5-large")
-
-    collate_fn = partial(
-        collate_finetune,
-        pad_token_id=tok.pad_token_id,
-        is_test=True,
-    )
-
-    dataloader = DataLoader(
-        data_set, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn
-    )
+    dataloader = CNNDailySeq2SeqDataModule(
+        tokenizer_name="t5-large", article_max_len=1024, summary_max_len=128
+    ).train_dataloader()
 
     for batch in dataloader:
         print(batch)
@@ -352,7 +397,7 @@ def _test_finetune_seq2seq_with_candidates_data():
         is_test=True,
         summary_max_len=128,
         article_max_len=512,
-        max_cand_num=16
+        max_cand_num=16,
     )
 
     print(data_set[0])
@@ -399,5 +444,5 @@ def _test_finetune_clm_data():
 
 if __name__ == "__main__":
     # _test_finetune_clm_data()
-    # _test_finetune_seq2seq_data()
-    _test_finetune_seq2seq_with_candidates_data()
+    _test_finetune_seq2seq_data()
+    # _test_finetune_seq2seq_with_candidates_data()

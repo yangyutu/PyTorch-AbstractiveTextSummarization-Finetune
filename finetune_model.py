@@ -21,17 +21,12 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
 
         self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
-    def forward(self, text_id, target_id):
-        batch_size = text_id.size(0)
-
-        input_mask = text_id != self.pad_token_id
-        target_mask = target_id != self.pad_token_id
-        # cand_mask[:, :, 0] = 1
+    def forward(self, encoded_input, encoded_target):
         output = self.model(
-            input_ids=text_id,
-            attention_mask=input_mask,
-            decoder_input_ids=target_id,
-            decoder_attention_mask=target_mask,
+            input_ids=encoded_input["input_ids"],
+            attention_mask=encoded_input["attention_mask"],
+            decoder_input_ids=encoded_target["input_ids"],
+            decoder_attention_mask=encoded_target["attention_mask"],
             output_hidden_states=True,
             return_dict=True,
         )
@@ -40,11 +35,11 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
         return logits
 
     def training_step(self, batch, batch_idx=0):
-        logits_raw = self.forward(batch["src_input_ids"], batch["target_ids"])
+        logits_raw = self.forward(batch["input_text"], batch["target_text"])
         logits = logits_raw[:, :-1].reshape(
             -1, logits_raw.size(-1)
         )  # truncate last token
-        gold = batch["target_ids"][:, 1:].reshape(-1)  # shift right
+        gold = batch["target_text"]["input_ids"][:, 1:].reshape(-1)  # shift right
         loss = self.mle_fn(logits, gold)
         self.log(
             "train_loss",
@@ -59,13 +54,13 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx=0):
         logits_raw = self.forward(
-            batch["src_input_ids"],
-            batch["target_ids"],
+            batch["input_text"],
+            batch["target_text"],
         )
         logits = logits_raw[:, :-1].reshape(
             -1, logits_raw.size(-1)
         )  # truncate last token
-        gold = batch["target_ids"][:, 1:].reshape(-1)  # shift right
+        gold = batch["target_text"]["input_ids"][:, 1:].reshape(-1)  # shift right
         loss = self.mle_fn(logits, gold)
 
         self.log(
@@ -76,27 +71,6 @@ class FinetuneSeq2SeqModel(pl.LightningModule):
             prog_bar=True,
             logger=True,
         )
-
-    def generate(
-        self,
-        src_input_ids,
-        min_length,
-        max_length,
-        do_sample=False,
-        **kwargs,
-    ):
-        input_mask = src_input_ids != self.pad_token_id
-
-        with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=src_input_ids,
-                attention_mask=input_mask,
-                max_length=max_length,
-                min_length=min_length,
-                do_sample=do_sample,
-                **kwargs,
-            )
-        return outputs
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), self.config["lr"])

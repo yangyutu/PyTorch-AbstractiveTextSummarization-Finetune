@@ -12,7 +12,7 @@ from pytorch_lightning.loggers.wandb import WandbLogger
 from transformers import RobertaModel, RobertaTokenizer
 from data_utils import (
     collate_finetune,
-    CNNDailySeq2SeqDataset,
+    CNNDailySeq2SeqDataModule,
 )
 from torch.utils.data import DataLoader
 from functools import partial
@@ -27,44 +27,20 @@ from transformers import (
 def _load_data(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name)
-    collate_fn = partial(
-        collate_finetune, pad_token_id=tokenizer.pad_token_id, is_test=False
-    )
-    collate_fn_val = partial(
-        collate_finetune, pad_token_id=tokenizer.pad_token_id, is_test=True
-    )
-
-    train_set = CNNDailySeq2SeqDataset(
+    data_module = CNNDailySeq2SeqDataModule(
         args.pretrained_model_name,
-        split="train",
         summary_max_len=args.summary_truncate,
         article_max_len=args.article_truncate,
-        model_type=args.pretrained_model_type,
+        add_prefix = args.add_prefix,
+        add_suffix = args.add_suffix,
+        batch_size = args.batch_size,
+        num_workers = args.num_workers
     )
-    val_set = CNNDailySeq2SeqDataset(
-        args.pretrained_model_name,
-        split="validation",
-        is_test=True,
-        summary_max_len=args.summary_truncate,
-        article_max_len=args.article_truncate,
-        model_type=args.pretrained_model_type,
-    )
+    
+    train_dataloader = data_module.train_dataloader()
+    val_dataloader = data_module.val_dataloader()
 
     print("finish dataset loading")
-    train_dataloader = DataLoader(
-        train_set,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        collate_fn=collate_fn,
-    )
-    val_dataloader = DataLoader(
-        val_set,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_fn_val,
-    )
     return train_dataloader, val_dataloader, tokenizer
 
 
@@ -142,7 +118,9 @@ def parse_arguments():
     parser.add_argument("--lr_warm_up_steps", type=int, default=10000)
     parser.add_argument("--article_truncate", type=int, default=512)
     parser.add_argument("--summary_truncate", type=int, default=512)
-    parser.add_argument("--pretrained_model_type", type=str, default="roberta-base")
+    parser.add_argument("--add_prefix", type=str, default="")
+    parser.add_argument("--add_suffix", type=str, default="")
+    
     parser.add_argument("--pretrained_model_name", type=str, default="roberta-base")
 
     parser.add_argument("--batch_size", type=int, default=32)

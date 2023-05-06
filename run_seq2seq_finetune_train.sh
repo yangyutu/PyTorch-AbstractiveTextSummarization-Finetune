@@ -7,9 +7,7 @@ pretrained_model_type="bart"
 
 
 pretrained_model_name="facebook/bart-large"
-pretrained_model_type="bart"
 python run_seq2seq_finetune_train.py \
---pretrained_model_type ${pretrained_model_type} \
 --pretrained_model_name ${pretrained_model_name} \
 --gpus 1 \
 --max_epochs 2 \
