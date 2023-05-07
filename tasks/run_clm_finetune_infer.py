@@ -5,12 +5,12 @@ import sys
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
 
-from finetune_model import FinetuneCausalLM
+from module.finetune_model import FinetuneCausalLM
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.progress import TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
 from transformers import RobertaModel, RobertaTokenizer
-from data_utils import (
+from data.data_utils import (
     to_cuda,
     collate_mp_clm_finetune,
     CNNDailyCausalLMDataset,

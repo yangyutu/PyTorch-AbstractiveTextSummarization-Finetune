@@ -18,7 +18,7 @@ def to_cuda(batch, gpuid):
             batch[n] = batch[n].to(gpuid)
 
 
-def collate_finetune(tokenizer, batch, pad_token_id, is_test=False):
+def collate_finetune(batch, pad_token_id, is_test=False):
     # This collate function is mainly used for padding
     def pad(X, max_len=-1):
         if max_len < 0:
@@ -44,7 +44,11 @@ def collate_finetune(tokenizer, batch, pad_token_id, is_test=False):
 
 
 def pair_text_collate_with_tokenization(
-    data, tokenizer, encoder_truncate, decoder_truncate, is_test=False
+    data,
+    tokenizer,
+    encoder_truncate,
+    decoder_truncate,
+    is_test=False,
 ):
     input_texts, target_texts = zip(*data)
     encoded_input = tokenizer(
@@ -68,6 +72,7 @@ def pair_text_collate_with_tokenization(
         return {
             "input_text": encoded_input,
             "target_text": encoded_target,
+            "raw_input_text": input_texts,
             "raw_target_text": target_texts,
         }
 
@@ -77,6 +82,7 @@ class CNNDailyPairTextDataset(Dataset):
         self.dataset = load_dataset("cnn_dailymail", version="3.0.0")[split]
         self.add_prefix = add_prefix
         self.add_suffix = add_suffix
+
     def __len__(self):
         return len(self.dataset)
 
@@ -171,42 +177,34 @@ class CNNDailySeq2SeqDataModule(pl.LightningDataModule):
 class CNNDailyCausalLMDataset(Dataset):
     def __init__(
         self,
-        tokenizer_name,
+        tokenizer,
         split="train",
         summary_max_len=128,
         is_test=False,
         total_len=768,
-        model_type="",
+        add_suffix="\nTL;DR:\n",
     ):
-        self.dataset_raw = load_dataset("cnn_dailymail", version="3.0.0")[split]
-        self.tok = AutoTokenizer.from_pretrained(tokenizer_name, verbose=False)
+        self.dataset = load_dataset("cnn_dailymail", version="3.0.0")[split]
+        self.tokenizer = tokenizer
         self.summary_max_len = summary_max_len
         self.is_test = is_test
         self.total_len = total_len
-        self.model_type = model_type
-
-        # pre-load the whole dataset to memory will significantly speed up
-        self.dataset = {
-            "article": list(self.dataset_raw["article"]),
-            "highlights": list(self.dataset_raw["highlights"]),
-        }
+        self.add_suffix = add_suffix
 
     def __len__(self):
-        return len(self.dataset["article"])
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        src_txt = self.dataset["article"][idx]
+        src_txt = self.dataset[idx]["article"]
 
-        prompt = "\nTL;DR:\n"
+        prompt_ids = self.tokenizer.encode(self.add_suffix, add_special_tokens=False)
 
-        prompt_ids = self.tok.encode(prompt, add_special_tokens=False)
-
-        src_input_ids = self.tok.encode(
+        src_input_ids = self.tokenizer.encode(
             src_txt, add_special_tokens=False, truncation=True, max_length=512
         )
-        abstract_txt = self.dataset["highlights"][idx].replace("\n", " ")
+        abstract_txt = self.dataset[idx]["highlights"].replace("\n", " ")
 
-        abstract_input_ids = self.tok.encode(
+        abstract_input_ids = self.tokenizer.encode(
             abstract_txt,
             add_special_tokens=False,
             truncation=True,
@@ -222,7 +220,8 @@ class CNNDailyCausalLMDataset(Dataset):
 
         result = {
             "input_ids": torch.LongTensor(input_ids),
-            "start_idx": src_allow_len + len(prompt_ids),
+            #"start_idx": src_allow_len + len(prompt_ids),
+            "start_idx": self.total_len - len(abstract_input_ids),
         }
         if self.is_test:
             result["data"] = {
@@ -230,6 +229,93 @@ class CNNDailyCausalLMDataset(Dataset):
                 "highlights": abstract_txt,
             }
         return result
+
+
+class CNNDailyCausalLMDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        tokenizer_name,
+        summary_max_len=512,
+        total_len=768,
+        add_suffix="",
+        batch_size=128,
+        num_workers=16,
+    ):
+        super().__init__()
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        # https://discuss.huggingface.co/t/batch-generation-with-gpt2/1517
+        self.tokenizer.padding_side = "left"
+        # Define PAD Token = EOS Token = 50256
+        self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.summary_max_len = summary_max_len
+        self.total_len = total_len
+        self.add_suffix = add_suffix
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def train_dataloader(self):
+        dataset = CNNDailyCausalLMDataset(
+            tokenizer=self.tokenizer,
+            split="train",
+            add_suffix=self.add_suffix,
+            summary_max_len=self.summary_max_len,
+            total_len=self.total_len,
+        )
+        collate_fn = partial(
+            collate_clm_finetune,
+            pad_token_id=self.tokenizer.pad_token_id,
+            is_test=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
+
+    def val_dataloader(self):
+        dataset = CNNDailyCausalLMDataset(
+            tokenizer=self.tokenizer,
+            split="validation",
+            add_suffix=self.add_suffix,
+            summary_max_len=self.summary_max_len,
+            total_len=self.total_len,
+        )
+        collate_fn = partial(
+            collate_clm_finetune,
+            pad_token_id=self.tokenizer.pad_token_id,
+            is_test=False,
+        )
+
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+
+    def test_dataloader(self):
+        dataset = CNNDailyCausalLMDataset(
+            tokenizer=self.tokenizer,
+            split="test",
+            add_suffix=self.add_suffix,
+            summary_max_len=self.summary_max_len,
+            total_len=self.total_len,
+        )
+        collate_fn = partial(
+            collate_clm_finetune,
+            pad_token_id=self.tokenizer.pad_token_id,
+            is_test=False,
+        )
+        return DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
 
 
 def collate_finetune_with_candidates(batch, pad_token_id, is_test=False):
@@ -263,8 +349,9 @@ def collate_clm_finetune(batch, pad_token_id=-100, is_test=False):
         if max_len < 0:
             max_len = max(x.size(0) for x in X)
         result = torch.ones(len(X), max_len, dtype=X[0].dtype) * pad_token_id
+        # left padding
         for i, x in enumerate(X):
-            result[i, : x.size(0)] = x
+            result[i, -x.size(0):] = x
         return result
 
     input_ids = pad([x["input_ids"] for x in batch])
@@ -380,7 +467,7 @@ class CNNDailyWithCandidatesSeq2SeqDataset(Dataset):
 
 def _test_finetune_seq2seq_data():
     dataloader = CNNDailySeq2SeqDataModule(
-        tokenizer_name="t5-large", article_max_len=1024, summary_max_len=128
+        tokenizer_name="t5-large", article_max_len=768, summary_max_len=128
     ).train_dataloader()
 
     for batch in dataloader:
@@ -419,23 +506,9 @@ def _test_finetune_seq2seq_with_candidates_data():
 
 
 def _test_finetune_clm_data():
-    data_set = CNNDailyCausalLMDataset(
-        "gpt2", is_test=True, summary_max_len=512, total_len=1024, model_type="gpt2"
-    )
-
-    for i in range(10):
-        print(data_set[i])
-
-    tok = AutoTokenizer.from_pretrained("gpt2")
-
-    collate_fn = partial(
-        collate_clm_finetune,
-        is_test=True,
-    )
-
-    dataloader = DataLoader(
-        data_set, batch_size=2, shuffle=False, num_workers=4, collate_fn=collate_fn
-    )
+    dataloader = CNNDailyCausalLMDataModule(
+        tokenizer_name="gpt2", summary_max_len=128, total_len=768
+    ).train_dataloader()
 
     for batch in dataloader:
         print(batch)
@@ -443,6 +516,6 @@ def _test_finetune_clm_data():
 
 
 if __name__ == "__main__":
-    # _test_finetune_clm_data()
-    _test_finetune_seq2seq_data()
+    _test_finetune_clm_data()
+    # _test_finetune_seq2seq_data()
     # _test_finetune_seq2seq_with_candidates_data()

@@ -4,11 +4,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from transformers import AutoModelForSeq2SeqLM
-from label_smoothing_loss import label_smoothing_loss
 from typing import Dict
 import pytorch_lightning as pl
-from losses import RankingLoss
-from modeling_bart import BartScorer
+from model.losses import RankingLoss
+from model.modeling_bart import BartScorer
 
 
 class FinetuneSeq2SeqModel(pl.LightningModule):
@@ -350,19 +349,14 @@ class FinetuneWithContrastEfficientSeq2SeqModel(pl.LightningModule):
 
 
 class FinetuneCausalLM(pl.LightningModule):
-    def __init__(self, config: Dict, pretrained_model, pad_token_id, label_smooth=0.0):
+    def __init__(self, config: Dict, pretrained_model, pad_token_id):
         super().__init__()
         self.save_hyperparameters()
         self.model = pretrained_model
         self.pad_token_id = pad_token_id
         self.config = config
 
-        if label_smooth > 0:
-            self.mle_fn = label_smoothing_loss(
-                ignore_index=pad_token_id, epsilon=label_smooth
-            )
-        else:
-            self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
+        self.mle_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id)
 
     def forward(self, batch):
         inputs = batch["input_ids"]
@@ -441,7 +435,7 @@ def _test_seq2seq_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailySeq2SeqDataset, collate_finetune
+    from data.data_utils import CNNDailySeq2SeqDataset, collate_finetune
 
     pretrained_model_name = "google/flan-t5-base"
     data_set = CNNDailySeq2SeqDataset(
@@ -488,7 +482,7 @@ def _test_seq2seq_with_candidates_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import (
+    from data.data_utils import (
         CNNDailyWithCandidatesSeq2SeqDataset,
         collate_finetune_with_candidates,
     )
@@ -542,7 +536,7 @@ def _test_seq2seq_with_candidates_efficient_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import (
+    from data.data_utils import (
         CNNDailyWithCandidatesSeq2SeqDataset,
         collate_finetune_with_candidates,
     )
@@ -594,7 +588,7 @@ def _test_clm_model_finetune():
         AutoTokenizer,
     )
     from functools import partial
-    from data_utils import CNNDailyCausalLMDataset, collate_clm_finetune
+    from data.data_utils import CNNDailyCausalLMDataset, collate_clm_finetune
 
     pretrained_model_name = "gpt2"
     data_set = CNNDailyCausalLMDataset(

@@ -5,14 +5,16 @@ import sys
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
 
-from finetune_model import FinetuneSeq2SeqModel
+from module.finetune_model import FinetuneCausalLM
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.progress import TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
 from transformers import RobertaModel, RobertaTokenizer
-from data_utils import (
-    collate_finetune,
-    CNNDailySeq2SeqDataModule,
+from data.data_utils import (
+    to_cuda,
+    collate_mp_clm_finetune,
+    CNNDailyCausalLMDataset,
+    FineTuneSeq2SeqDataset,
 )
 from torch.utils.data import DataLoader
 from functools import partial
@@ -21,26 +23,91 @@ from transformers import (
     BartForConditionalGeneration,
     T5ForConditionalGeneration,
     AutoTokenizer,
+    GPT2LMHeadModel,
 )
 
 
 def _load_data(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name)
-    data_module = CNNDailySeq2SeqDataModule(
-        args.pretrained_model_name,
-        summary_max_len=args.summary_truncate,
-        article_max_len=args.article_truncate,
-        add_prefix = args.add_prefix,
-        add_suffix = args.add_suffix,
-        batch_size = args.batch_size,
-        num_workers = args.num_workers
+    collate_fn = partial(
+        collate_mp_clm_finetune, pad_token_id=tokenizer.eos_token_id, is_test=False
     )
-    
-    train_dataloader = data_module.train_dataloader()
-    val_dataloader = data_module.val_dataloader()
+    collate_fn_val = partial(
+        collate_mp_clm_finetune, pad_token_id=tokenizer.eos_token_id, is_test=True
+    )
+
+    train_set = CNNDailyCausalLMDataset(
+        args.pretrained_model_name,
+        split="train",
+        summary_max_len=args.truncate,
+        total_len=768,
+    )
+    val_set = CNNDailyCausalLMDataset(
+        args.pretrained_model_name,
+        split="validation",
+        is_test=True,
+        summary_max_len=args.truncate,
+        total_len=768,
+    )
 
     print("finish dataset loading")
+    train_dataloader = DataLoader(
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
+    val_dataloader = DataLoader(
+        val_set,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn_val,
+    )
+    return train_dataloader, val_dataloader, tokenizer
+
+
+def _load_data_old(args):
+
+    tokenizer = BartTokenizer.from_pretrained(args.pretrained_model_name)
+    collate_fn = partial(
+        collate_mp_clm_finetune, pad_token_id=tokenizer.pad_token_id, is_test=False
+    )
+    collate_fn_val = partial(
+        collate_mp_clm_finetune, pad_token_id=tokenizer.pad_token_id, is_test=True
+    )
+
+    train_set = FineTuneSeq2SeqDataset(
+        f"{args.data_dir}/train",
+        args.pretrained_model_name,
+        summary_max_len=args.truncate,
+        article_max_len=512,
+    )
+    val_set = FineTuneSeq2SeqDataset(
+        f"{args.data_dir}/val",
+        args.pretrained_model_name,
+        is_test=True,
+        summary_max_len=512,
+        article_max_len=512,
+    )
+
+    print("finish dataset loading")
+    train_dataloader = DataLoader(
+        train_set,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn,
+    )
+    val_dataloader = DataLoader(
+        val_set,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn_val,
+    )
     return train_dataloader, val_dataloader, tokenizer
 
 
@@ -54,16 +121,20 @@ def main(args):
     config["lr"] = args.lr
     config["lr_warm_up_steps"] = args.lr_warm_up_steps
 
-    model = FinetuneSeq2SeqModel(
+    pretrained_model = GPT2LMHeadModel.from_pretrained(
+        args.pretrained_model_name, cache_dir="./local_cache"
+    )
+
+    model = FinetuneCausalLM(
         config=config,
-        pretrained_model_name=args.pretrained_model_name,
-        pad_token_id=tokenizer.pad_token_id
+        pretrained_model=pretrained_model,
+        pad_token_id=tokenizer.eos_token_id,
+        label_smooth=0,
     )
 
     tags = [args.pretrained_model_name]
     if args.exp_tag:
         tags.append(args.exp_tag)
-        
     wandb_logger = WandbLogger(
         project=args.project_name,  #
         log_model="all",
@@ -93,6 +164,8 @@ def main(args):
         deterministic=True,  # RuntimeError: scatter_add_cuda_kernel does not have a deterministic implementation, but you set 'torch.use_deterministic_algorithms(True)'.
     )
 
+    # trainer.validate(model, dataloaders=val_dataloader)
+    # 4. Train!
     trainer.fit(model, train_dataloader, val_dataloader)
 
 
@@ -103,6 +176,8 @@ def parse_arguments():
     # trainer specific arguments
 
     parser.add_argument("--seed", type=int, default=1)
+    # parser.add_argument("--data_dir", type=str, required=True)
+    # parser.add_argument("--dataset_name", type=str, required=True)
 
     parser.add_argument("--gpus", type=int, default=1)
     parser.add_argument("--precision", type=int, default=16)
@@ -116,11 +191,9 @@ def parse_arguments():
     # # model specific arguments
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--lr_warm_up_steps", type=int, default=10000)
-    parser.add_argument("--article_truncate", type=int, default=512)
-    parser.add_argument("--summary_truncate", type=int, default=512)
-    parser.add_argument("--add_prefix", type=str, default="")
-    parser.add_argument("--add_suffix", type=str, default="")
-    
+    parser.add_argument("--truncate", type=int, default=512)
+    parser.add_argument("--pretrained_model_type", type=str, default="roberta-base")
+
     parser.add_argument("--pretrained_model_name", type=str, default="roberta-base")
 
     parser.add_argument("--batch_size", type=int, default=32)

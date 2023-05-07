@@ -5,23 +5,19 @@ import sys
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
 
-from finetune_model import FinetuneSeq2SeqModel
+from module.finetune_model import FinetuneSeq2SeqModel
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.callbacks.progress import TQDMProgressBar
 from pytorch_lightning.loggers.wandb import WandbLogger
 from transformers import RobertaModel, RobertaTokenizer
-from data_utils import (
+from data.data_utils import (
     collate_finetune,
-    CNNDailySeq2SeqDataset,
+    CNNDailySeq2SeqDataModule,
 )
 from torch.utils.data import DataLoader
 from functools import partial
 from transformers import (
-    BartTokenizer,
-    AutoModel,
     AutoTokenizer,
-    BartForConditionalGeneration,
-    T5ForConditionalGeneration,
     AutoModelForSeq2SeqLM,
 )
 from rouge import Rouge
@@ -37,35 +33,24 @@ def main(args):
         model = AutoModelForSeq2SeqLM.from_pretrained(args.pretrained_model_name)
     else:
         model = FinetuneSeq2SeqModel.load_from_checkpoint(args.model_ckpt).model
-    tok = AutoTokenizer.from_pretrained(args.pretrained_model_name)
-    collate_fn_test = partial(
-        collate_finetune, pad_token_id=tok.pad_token_id, is_test=True
-    )
-
-    test_set = CNNDailySeq2SeqDataset(
+    tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name)
+    data_module = CNNDailySeq2SeqDataModule(
         args.pretrained_model_name,
-        split="test",
         summary_max_len=args.summary_truncate,
         article_max_len=args.article_truncate,
-        is_test=True,
-        model_type=args.pretrained_model_type,
+        add_prefix = args.add_prefix,
+        add_suffix = args.add_suffix,
+        batch_size = args.batch_size,
+        num_workers = args.num_workers
     )
-
-    print("finish dataset loading")
-
-    test_dataloader = DataLoader(
-        test_set,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        collate_fn=collate_fn_test,
-    )
+    
+    test_dataloader =data_module.test_dataloader()
 
     device = 0 if torch.cuda.is_available() else -1
     summarizer = pipeline(
         "summarization",
         model=model,
-        tokenizer=tok,
+        tokenizer=tokenizer,
         device=device,
         truncation=True,
         batch_size=args.batch_size,
@@ -74,9 +59,9 @@ def main(args):
     references = []
     final_outputs = []
     for i, batch in tqdm.tqdm(enumerate(test_dataloader)):
-        articles = [item["article"] for item in batch["data"]]
+        articles = [item for item in batch["raw_input_text"]]
         outputs = summarizer(articles, max_length=130, min_length=30, do_sample=False)
-        references.extend([item["highlights"] for item in batch["data"]])
+        references.extend([item for item in batch["raw_target_text"]])
         for output in outputs:
             final_outputs.append(output["summary_text"].strip())
     #    break
@@ -114,9 +99,8 @@ def parse_arguments():
     parser.add_argument(
         "--pretrained_model_name", type=str, default="facebook/bart-large-cnn"
     )
-    parser.add_argument(
-        "--pretrained_model_type", type=str, default="facebook/bart-large-cnn"
-    )
+    parser.add_argument("--add_prefix", type=str, default="")
+    parser.add_argument("--add_suffix", type=str, default="")
     parser.add_argument("--model_ckpt", type=str, default="")
 
     parser.add_argument("--batch_size", type=int, default=32)
